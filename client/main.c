@@ -1,8 +1,12 @@
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <memory.h>
 #include <stdlib.h>
+#include <sys/poll.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -13,8 +17,16 @@
 const int MESSAGE_BUF_LEN = 512;
 
 int main(void) {
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
-	if(fd == -1) {
+	// List of sockets to
+	struct pollfd pfds[2];
+	memset((void*)pfds, 0, sizeof(struct pollfd) * 2);
+
+	pfds[0].fd = 0;
+	pfds[0].events = POLLIN;
+
+	pfds[1].fd = socket(AF_INET, SOCK_STREAM, 0);
+	pfds[1].events = POLLIN;
+	if(pfds[1].fd == -1) {
 		puts("Unable to create a socket!");
 		return -1;
 	}
@@ -33,26 +45,48 @@ int main(void) {
 	addr.sin_port = htons(25565); // put that jawn in network byte order
 	addr.sin_addr.s_addr = inet_addr(ipv4_address); // local host
 	
-	if(connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+	if(connect(pfds[1].fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+		printf("Error code: %d\n", errno);
 		perror("Connection to host failed!");
-		close(fd);
+		close(pfds[1].fd);
 		return -1;
+	}
+
+	{
+		int opts = fcntl(pfds[0].fd, F_GETFL, 0);
+		fcntl(pfds[0].fd, F_SETFL, opts | O_NONBLOCK);
+
+		opts = fcntl(pfds[1].fd, F_GETFL, 0);
+		fcntl(pfds[1].fd, F_SETFL, opts | O_NONBLOCK);
 	}
 
 	void* message_buf = calloc(MESSAGE_BUF_LEN, sizeof(char));
 	for(;;) {
-		int message_len = read(0, message_buf, MESSAGE_BUF_LEN);
-		if(message_len == -1) {
-			perror("Failed to send message!\n");
+		if(poll(pfds, 2, -1) == -1) {
+			printf("Poll failed with error code %d\n", errno);
 			continue;
 		}
+		
+		if(pfds[0].revents & POLLIN) {
+			size_t message_len = read(pfds[0].fd, message_buf, MESSAGE_BUF_LEN);
 
-		if(write(fd, message_buf, message_len) == -1) {
-			perror("Message writing failed!\n");
-			continue;
+			if(message_len != -1) {
+				if(write(pfds[1].fd, message_buf, message_len) == -1) {
+					perror("Message writing failed!\n");
+				}
+			}
+		}
+
+		if(pfds[1].revents & POLLIN) {
+			size_t message_len = read(pfds[1].fd, message_buf, MESSAGE_BUF_LEN);
+			if(message_len != -1) {
+				// I don't think I need a pfds for this
+				write(1, message_buf, message_len);
+			}
 		}
 	}
 	
-	close(fd);
+	close(pfds[0].fd);
+	close(pfds[1].fd);
 	return 0;
 }
